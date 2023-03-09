@@ -4,6 +4,14 @@ Crude Oil price fluctuations seems to be a strong indicator of the current marke
 
 Data Source: [Economic Research - Federal Reserve Bank of St.Louis](https://fred.stlouisfed.org/series/DCOILWTICO)
 
-This particular dataset has the spot prices of the WTI - Cushing Oklahoma crude oil which is published on a daily basis by the U.S. Energy Information Administration and is tracked in dollars per barrel.
+This particular dataset has the spot prices of the WTI - Cushing Oklahoma crude oil which is published on a daily basis by the [U.S. Energy Information Administration](https://www.eia.gov/dnav/pet/pet_pri_spt_s1_d.htm) and is tracked in dollars per barrel.
 
 Definition of WTI - Cushing Oklahoma Crude Oil (as per EIA): A crude stream produced in Texas and southern Oklahoma which serves as a reference or “marker” for pricing a number of other crude streams and which is traded in the domestic spot market at Cushing, Oklahoma.
+
+Project Outline:
+- Introduction
+- EDA
+- ARIMA
+- Prophet
+- Cross Validation
+- Forecast
