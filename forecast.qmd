@@ -1,0 +1,780 @@
+---
+title: "Forecasting Crude Oil Prices"
+author: "Rahul Chada"
+format:
+  html:
+    code-fold: true
+    embed-resources: true
+---
+
+```{r include=FALSE, echo = FALSE, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+```{r include=FALSE, echo = FALSE, warning = FALSE, message = FALSE}
+library(tidyverse)
+library(rmarkdown)
+library(knitr)
+library(dplyr)
+library(DT)
+library(htmlTable)
+library(lubridate)
+library(tsibble)
+library(ggplot2)
+library(ggpubr)
+library(plotly)
+library(scales)
+library(forecast)
+library(zoo)
+library(magrittr)
+library(feasts)
+library(tseries)
+library(gapminder)
+library(janitor)
+library(gt)
+library(patchwork)
+library(kableExtra)
+library(knitr)
+library(data.table)
+library(corrplot)
+library(feasts)
+library(fable)
+library(psych)
+library(tidyverse)
+library(fable.prophet)
+library(prophet)
+library(lemon)
+library(gridExtra)
+```
+
+::: {.panel-tabset}
+
+# Introduction
+
+### Description of the time-series dataset
+
+Crude Oil price fluctuations seems to be a strong indicator of the current market conditions. During Covid-19, crude oil prices went down to as low as 10\$ per barrel resulting from very little demand in the market, and later shot up as economies re-opened globally. Also, the Russia-Ukraine war led the crude oil prices spike up to 110\$ per barrel in 2022. Hence, I believe accurately forecasting the crude oil prices helps evaluate the future macroeconomic environment. This being said, as crude oil prices fluctuate depending on the economic factors, this would make the forecasting difficult and problematic to predict.
+
+**Data Source:** [Economic Research - Federal Reserve Bank *of* St.Louis](https://fred.stlouisfed.org/series/DCOILWTICO)
+
+This particular dataset has the spot prices of the WTI - Cushing Oklahoma crude oil which is published on a daily basis by the [U.S. Energy Information Administration](https://www.eia.gov/dnav/pet/pet_pri_spt_s1_d.htm) and is tracked in *dollars per barrel*.
+
+**Definition of WTI - Cushing Oklahoma Crude Oil (as per EIA):** A crude stream produced in Texas and southern Oklahoma which serves as a reference or "marker" for pricing a number of other crude streams and which is traded in the domestic spot market at Cushing, Oklahoma.
+
+### Sample of the dataset
+
+```{r, warning = FALSE, message = FALSE}
+price_data <- read.csv("DCOILWTICO.csv")
+colnames(price_data) <- c('Date','Price')
+#kable(head(price_data), align=rep('c', 2))
+
+price_data$Date <- ymd(price_data$Date)
+price_data <- price_data %>% filter(Date >= '2012-01-01')
+
+head(price_data[-1,]) %>%
+  kbl(align=rep('c', 2), caption = "Sample of the dataset") %>%
+  kable_styling()
+```
+
+**For simplification, crude oil prices are averaged at monthly levels. The complete analysis done is at monthly levels for the period between 2012-2023 and crude oil price is measured in Dollars per barrel**
+
+### Train-Test Split
+
+```{r, warning = FALSE, message = FALSE}
+price_data$Price[price_data$Price == "."] <- NA # Replacing special character with NA
+price_data <- price_data %>% drop_na(Price) # Removing rows with NA values
+price_data$Price <- as.numeric(price_data$Price)
+
+# Monthly data
+price_data_monthly <- price_data %>%
+  mutate(Date = yearmonth(Date)) %>%
+  group_by(Date) %>%
+  summarise(Price = mean(Price)) %>%
+  as_tsibble(index = Date)
+
+price_monthly_test <- price_data_monthly %>%
+  filter(Date>=yearmonth('2020-01-01'))
+
+price_monthly_train = price_data_monthly %>% 
+  filter(Date<yearmonth('2020-01-01'))
+
+head(price_monthly_train) %>%
+  kbl(align=rep('c', 2), caption = "Sample of the average monthly crude oil prices") %>%
+  kable_styling()
+```
+
+# EDA
+
+The plot below shows the monthly average crude oil prices for the period 2012-2019. We can see that there is a dip in the oil prices observed around mid-2014 attributed to an oversupply of crude-oil compared to demand.
+
+```{r, warning = FALSE, message = FALSE}
+oil_price_plot <- price_monthly_train %>%
+  ggplot() +
+  geom_line(aes(Date, Price)) +
+  theme_bw() +
+  xlab("Date") +
+  ylab("Crude Oil Price") +
+  ggtitle("Crude Oil Monthly Average Prices"
+    ,subtitle = "Price Trend from 2012 to 2019 (in USD per barrel)"
+  )
+
+oil_price_plot
+```
+
+The distribution of the crude oil prices is shown below using a histogram and a density plot.
+
+```{r, warning = FALSE}
+hist <- price_monthly_train %>%
+  ggplot() +
+  geom_histogram(aes(Price), bins = 50, fill="black", colour="black", alpha = 0.25) +
+  theme_bw() +
+  xlim(0, 150) +
+  ylim(0,12) +
+  xlab("Price") +
+  ylab("Count") +
+  ggtitle("Histogram of Crude Oil Prices")
+
+hist
+```
+
+As can be seen, there are 2 peaks observed around 50\$ and at 100\$. The price seem to follow a bimodal distribution.
+
+```{r, warning = FALSE, message = FALSE}
+dens <- price_monthly_train %>%
+  ggplot() +
+  geom_density(aes(Price)) +
+  theme_bw() +
+  xlab("Price") +
+  ylab("Density") +
+  ggtitle("Density Plot of Crude Oil Prices")
+
+dens
+```
+
+The distribution can also be visualized in a boxplot as shown below. This would also help identify if there are any outliers in the dataset. Also, from this plot, it can be seen that the median crude oil price is around 60\$ per barrel during 2012-2019.
+
+```{r, warning = FALSE, message = FALSE}
+boxplot <- price_monthly_train %>%
+  ggplot() +
+  geom_boxplot(aes("", Price)) +
+  theme_bw()  +
+  ggtitle("Boxplot of Crude Oil Prices")
+  
+boxplot
+```
+
+There seems to be no outliers in this dataset which might be because the data has been averaged to monthly prices.
+
+More summary statistics for the dataset is shown in the dataset below.
+
+```{r, warning = FALSE, message = FALSE}
+summary_stats <- round(t(describe(price_monthly_train$Price)),2)
+
+summary_stats <- cbind('Summary Statistic' = rownames(summary_stats), summary_stats)
+row.names(summary_stats) <- NULL
+colnames(summary_stats) <- c('Summary Statistic','Value')
+#summary_stats$Value <- round(summary_stats$Value, digit = 2 )
+summary_stats[-c(1,12),]  %>%
+  kbl(align=rep('c', 2), caption = "Summary Statistics") %>%
+  kable_styling()
+```
+
+Here 'n' is the number of observations in the dataset.
+
+## MA and Seasonality
+
+### Moving Average
+
+Trend from the time series dataset is visualized using the moving averages technique. 6th order indicates 6-steps used in calculating the right-aligned moving average.
+
+```{r, warning=FALSE}
+price_ma_data <- price_monthly_train %>%
+  arrange(Date) %>%
+  mutate(
+    value_ma_6 = rollapply(Price, 6, FUN = mean, align = "right", fill = NA),
+    value_ma_9 = rollapply(Price, 9, FUN = mean, align = "right", fill = NA)
+  )
+
+price_ma_data_pivot <- price_ma_data %>%
+  set_colnames(c("Date", "Monthly_Price", "6th Order", "9th Order")) %>%
+  pivot_longer(-c('Date', 'Monthly_Price'), names_to = "MA_Order", values_to = "Price")
+  
+#price_ma_data_pivot
+
+price_ma_data_pivot %>%
+  ggplot() +
+  geom_line(aes(Date, Monthly_Price), size = 1, alpha = 1.0) +
+  geom_line(aes(Date, Price,color = MA_Order), size = 1, alpha =0.9) +
+  theme_bw() +
+  xlab("Date") +
+  ylab("Price") +
+  ggtitle("Moving Average of Crude Oil Prices")
+
+
+# fig <- plot_ly(price_ma_data, x = ~Date)
+# fig <- fig %>% add_trace(y = ~value_ma_6, name = '6',mode = 'lines')
+# fig <- fig %>% add_trace(y = ~value_ma_9, name = '9', mode = 'lines')
+# 
+# fig
+```
+
+From the above chart, it can be seen that 6th order moving average seem to best capture the trend while the 9th order seem to be smoothening the underlying data.
+
+### Seasonality
+
+Assessing if the crude-oil prices contain any seasonality using classical decomposition. It can be seen in the plot below that decomposition model is showing us that there is seasonality in the dataset. While this may be true, decomposition model always outputs a seasonality even when there isn't one in a timeseries. So, further checks are needed to test seasonality.
+
+```{r, warning = FALSE, message = FALSE}
+price_data_decomp <- price_monthly_train %>%
+  arrange(Date) %>%
+  mutate(
+    ma_6_right = rollapply(Price, 6, FUN = mean, align = "right", fill = NA)
+  ) %>%
+  mutate(resid = Price - ma_6_right) %>%
+  select(Date, Price, ma_6_right, resid)
+
+price_monthly_train %>%
+  model(
+    classical_decomposition(Price)
+  ) %>%
+  components() %>%
+  autoplot()
+```
+
+Plot between the residuals (moving average - price) and it's lag shown below indicates that there is no correlation on any order of lag confirming our suspicion that there is no seasonality in the data. Crude Oil Prices typically don't have seasonal fluctuations and this is proved with the help of the lag plot of the remainder. So, the seasonality output given by the classical decomposition model is incorrect in this case.
+
+```{r, warning = FALSE, message = FALSE}
+price_data_decomp %>%
+  drop_na() %>%
+  gg_lag(resid, geom = "point", lags = 1:12, ) +
+  geom_smooth(aes(color=NULL),method='lm',color='red',se=F) +
+  labs(title="Lag Plot of the residuals to test seasonality")
+```
+
+# ARIMA
+
+## Stationarity
+
+### ACF and PACF Plot
+
+[Reference from Forecasting Principles and Practice:](https://otexts.com/fpp3/) For a stationary time series, the ACF will drop to zero relatively quickly, while the ACF of non-stationary data decreases slowly. Also, for non-stationary data, the value of correlation is often large and positive.
+
+In the ACF plot shown below, it can be seen that there is a significantly 'longer memory' for the oil prices which indicates that the dataset is a non-stationary dataset.
+
+```{r warning = FALSE, message = FALSE}
+par(mfrow = c(1, 2))
+acf(price_monthly_train)
+pacf(price_monthly_train)
+```
+
+### Rolling Calculations to Detect Stationarity
+
+As can be seen from the plots below, oil prices seem to have a noticeable trend and changing levels. The prices should revert to a global mean if it were to be mean-stationary and should have a constant variance (for variance stationary). Oil prices rise up/fall down depend on various external socio-economic factors and doesn't hover around a certain price in the long-term. Macroenvironment conditions has an influence on the mean and variance. 
+
+```{r warning = FALSE, message = FALSE}
+
+price_data_roll <- price_monthly_train %>%
+  mutate(
+    price_mean = zoo::rollmean(
+      Price, 
+      k = 12, 
+      fill = NA),
+    price_sd = zoo::rollapply(
+      Price, 
+      FUN = sd, 
+      width = 12, 
+      fill = NA)
+  )
+
+price_data_rollmean <- price_data_roll %>%
+  ggplot() +
+    geom_line(aes(Date, Price)) +
+  geom_line(aes(Date, price_mean),color='blue') +
+  theme_bw() +
+  ggtitle("Oil Prices Mean over Time (12 month rolling window)") +
+  ylab("Price (in USD)") +
+  xlab("Date")
+
+price_data_rollsd <- price_data_roll %>%
+  ggplot() +
+  geom_line(aes(Date, price_sd)) +
+  geom_smooth(aes(Date,price_sd),method='lm',se=F)+
+  theme_bw() +
+  ggtitle("Oil Prices Standard Deviation over Time (12 month rolling window)") +
+  ylab("Price (in USD)") +
+  xlab("Date")
+
+#par(mfrow = c(1, 2))
+
+grid.arrange(price_data_rollmean, price_data_rollsd, ncol=2)
+```
+
+### Transformations
+
+Crude-oil prices dataset is neither variance stationary nor mean stationary as noted in the previous section. So, the dataset is transformed using log transformation to assess if this would result in a stationary data. Also, since there is no seasonality in the dataset as confirmed in the previous section, there would be no need for seasonal differencing to be performed on the dataset.
+
+The plots below shows the rolling mean and standard deviation of log transformed and first-differenced, log transformed timeseries.
+
+```{r warning = FALSE, message = FALSE}
+price_trans_train <- price_monthly_train %>%
+  mutate(price_log = log1p(Price))
+# %>% mutate(price_boxcox = forecast::BoxCox(Price, lambda = "auto"))
+
+price_trans_df <- price_trans_train %>%
+  mutate(
+    price_log_mean = zoo::rollmean(
+      price_log, 
+      k = 12, 
+      fill = NA),
+    price_log_sd = zoo::rollapply(
+      price_log, 
+      FUN = sd, 
+      width = 12, 
+      fill = NA)
+  ) %>%
+  mutate(log_price_diff = price_log - lag(price_log)) %>%
+  mutate(
+    price_log_diff_mean = zoo::rollmean(
+      log_price_diff, 
+      k = 12, 
+      fill = NA),
+    price_log_diff_sd = zoo::rollapply(
+      log_price_diff, 
+      FUN = sd, 
+      width = 12, 
+      fill = NA)
+    )
+
+price_log_roll_mean_plot <- price_trans_df %>%
+  ggplot() +
+    geom_line(aes(Date, price_log)) +
+  geom_line(aes(Date, price_log_mean),color='blue') +
+  theme_bw() +
+  ggtitle("Log Transformed", subtitle = '12 month rolling mean') +
+  ylab("Log-Price") +
+  xlab("Date")
+
+price_log_roll_sd_plot <- price_trans_df %>%
+  ggplot() +
+  geom_line(aes(Date, price_log_sd)) +
+  geom_smooth(aes(Date,price_log_sd),method='lm',se=F)+
+  theme_bw() +
+  ggtitle("Log Transformed SD", subtitle = '12 month rolling SD') +
+  ylab("SD Log-Price") +
+  xlab("Date")
+
+price_log_diff_mean_plot <- price_trans_df %>%
+  drop_na() %>%
+  ggplot() +
+  geom_line(aes(Date, log_price_diff)) +
+  geom_line(aes(Date, price_log_diff_mean),color='blue') +
+  theme_bw() +
+  ggtitle("First-Difference, Log", subtitle = "12 month rolling mean") +
+  ylab("Value") +
+  xlab("Date")
+
+price_log_diff_sd_plot <- price_trans_df %>%
+  ggplot()+
+  geom_line(aes(Date,price_log_diff_sd))+
+  geom_smooth(aes(Date,price_log_diff_sd),method='lm',se=F)+
+  theme_bw() +
+  ggtitle("First-Difference Log SD", subtitle = '12 month rolling SD') +
+  ylab("Value") +
+  xlab("Date")
+
+grid.arrange(price_log_roll_mean_plot, price_log_roll_sd_plot, price_log_diff_mean_plot, price_log_diff_sd_plot, ncol=2, nrow = 2)
+```
+
+### KPSS Test
+
+The pvalue's from the KPSS test of the original training and the log-transformed oil prices has a p-value of less than 0.05 (p \< 0.05) which indicates that it is non-stationary. However, KPSS test on the first-difference, log transformed dataset confirms that the timeseries is now stationary as the p-value is \>0.05. 
+
+Summary of the KPSS test results on the three variables is shown below:
+
+```{r warning = FALSE, message = FALSE}
+
+# Raw price - Non-stationary
+raw_value_kpss = price_trans_df %>% 
+features(Price, unitroot_kpss)
+
+# Log price - Non-stationary
+log_value_kpss = price_trans_df %>%
+features(price_log, unitroot_kpss)
+
+# Log,difference price  - Stationary
+log_diff_value_kpss = price_trans_df %>%
+features(log_price_diff, unitroot_kpss)
+
+kpss_testing <- bind_rows(raw_value_kpss, log_value_kpss, log_diff_value_kpss)
+kpss_testing <- kpss_testing %>% 
+  add_column(type = c('Original Dataset', 'Log Transformed', 'Log Differenced')) %>%
+  relocate(type, .before = kpss_stat) %>%
+  rename("Timeseries" = 'type', "KPSS Stat Value" = "kpss_stat", 'p-value' = 'kpss_pvalue')
+
+head(kpss_testing,3) %>%
+  kbl(align=rep('c', 3), caption = "KPSS test for stationarity") %>%
+  kable_styling()
+```
+
+
+### ACF/PACF to determine the order
+
+From the ACF plot alone shown below, it can be seen that the first order is significant but there is **no dampening** effect (exponential decay) of correlation. Hence, it can be concluded that this dataset doesn't have an Autoregressive (AR) process. This would mean that it might only have a moving average component. For determining the order of the MA process, we look at the number of statistically significant lags in ACF plot (one in this case). Hence, it's an MA (1) process. Also since, the dataset is first-differenced, the order of the integrated component would be 1. And the order of the original un-transformed dataset is suspected to be following **ARIMA(0,1,1)**.
+
+```{r warning = FALSE, message = FALSE}
+acf = price_trans_df %>%
+    drop_na() %>%
+  ACF(log_price_diff,lag_max=10) %>%
+  autoplot()
+
+pacf =  price_trans_df %>%
+    drop_na() %>%
+  fill_gaps() %>%
+  PACF(log_price_diff) %>%
+  autoplot()
+
+acf + pacf
+```
+
+
+## Fitting ARIMA Models
+
+Several ARIMA models are fit on the transformed time-series dataset. Auto-ARIMA is also built on the dataset (Model 8). These models are shown in the table below:
+
+| Model Name | ARIMA Components |
+|:----------:|:----------------:|
+|  Model 1   |  ARIMA (0,1,1)   |
+|  Model 2   |  ARIMA (0,1,0)   |
+|  Model 3   |  ARIMA (1,1,0)   |
+|  Model 4   |  ARIMA (1,1,1)   |
+|  Model 5   |  ARIMA (2,1,0)   |
+|  Model 6   |  ARIMA (0,2,1)   |
+|  Model 7   |  ARIMA (0,1,2)   |
+|  Model 8   |   Auto-ARIMA     |
+
+
+Table below shows the 'best' ARIMA models ranked by their BIC values (lowest first). The BIC values for model-3 and Auto-ARIMA are the lowest. Also, it can be seen that both model-3 and Auto-ARIMA predicts the time-series to be be ARIMA(1,1,0) while we suspected the timeseries to be ARIMA(0,1,1).
+
+```{r warning = FALSE, message = FALSE}
+arima_models = price_trans_df %>%
+  select(Date, price_log) %>%
+  drop_na() %>%
+  model(
+    Model1 = ARIMA(price_log~pdq(0,1,1)+PDQ(0,0,0)),
+    Model2 = ARIMA(price_log~pdq(0,1,0)+PDQ(0,0,0)),
+    Model3 = ARIMA(price_log~pdq(1,1,0)+PDQ(0,0,0)),
+    Model4 = ARIMA(price_log~pdq(1,1,1)+PDQ(0,0,0)),
+    Model5 = ARIMA(price_log~pdq(2,1,0)+PDQ(0,0,0)),
+    Model6 = ARIMA(price_log~pdq(0,2,1)+PDQ(0,0,0)),
+    Model7 = ARIMA(price_log~pdq(0,1,2)+PDQ(0,0,0)),
+    Model8 = ARIMA(price_log, approximation = F)
+  )
+
+# best_model = price_trans_df %>%
+#   select(Date, price_log) %>%
+#   drop_na() %>%
+#   model(
+#     ARIMA(price_log,approximation=F,
+#     )
+#   )
+
+models_bic <- arima_models %>%
+  glance() %>%
+  arrange(BIC)
+
+head(models_bic[1:6],8) %>%
+  kbl(align=rep('c', 9), caption = "Best ARIMA models sorted by BIC values") %>%
+  kable_styling()
+```
+
+
+#### Analyzing the residuals
+
+```{r warning = FALSE, message = FALSE}
+
+best_model = price_trans_df %>%
+  select(Date, price_log) %>%
+  drop_na() %>%
+  model(
+    ARIMA(price_log~pdq(1,1,0)+PDQ(0,0,0))
+  )
+
+best_model %>%
+  gg_tsresiduals()
+
+```
+
+The ACF plot of the residuals from the ARIMA(1,1,0) model on the log transforrmed time-series shows that all autocorrelations are within the threshold limits, indicating that the residuals are behaving like white noise.
+
+#### Ljung-Box Test
+
+Ljung-Box test on the best ARIMA(1,1,0) model returns p-values higher than 0.05. This also suggests that the residuals are white-noise.
+
+```{r warning = FALSE, message = FALSE}
+ljung_lag3 <- best_model %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 3, dof = 1)
+
+ljung_lag8 <- best_model %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 8, dof = 1)
+
+Lag <- c('Lag 3', 'Lag 8')
+ljung_box_results <- rbind(ljung_lag3, ljung_lag8)
+ljung_box_results <- cbind(Lag, ljung_box_results)
+
+head(ljung_box_results) %>%
+  kbl(align=rep('c', 3), caption = "Ljung-Box Test on the Best ARIMA Model") %>%
+  kable_styling()
+```
+
+# Prophet
+
+The basic prophet model is fit as: $$y_{t} = g_{t}+s_{t}+h_{t}+\epsilon_{t}$$
+
+where $g_{t}$ is the trend, $s_{t}$ is seasonality, $h_{t}$ are holidays, and $\epsilon_{t}$ is the white noise error term.
+
+Since the crude-oil price dataset is at monthly levels, there is *no holiday* impact and the model incorporates the trend and seasonality with default parameters.
+
+Building a prophet model with default parameters is shown below. It can be seen that the model doesn't seem to capture the underlying data generating process accurately.
+
+```{r warning = FALSE, message = FALSE}
+prophet_test <- price_monthly_test %>%
+    rename(ds = Date, y = Price)
+
+prophet_train = price_monthly_train %>%
+    rename(ds = Date, y = Price)
+
+orig_model = prophet(prophet_train, weekly.seasonality=FALSE, daily.seasonality = FALSE) # Train Model
+
+orig_future = make_future_dataframe(orig_model,periods = 36, freq = 'month') # Create future dataframe for predictions
+
+orig_forecast = predict(orig_model,orig_future) # Get forecast
+
+plot(orig_model, fcst = orig_forecast) +
+  add_changepoints_to_plot(orig_model) +
+  ylab("Crude Oil Price (in $ per barrel)") +
+  xlab("Date") +
+  theme_bw() +
+  ggtitle("Prophet Model on the Crude Oil Prices"
+    ,subtitle = "Default Changepoints and Forecast for 36 periods"
+  )
+```
+
+The default changepoints does not capture the trend changes when the oil prices fell down by around 50% in late 2014. This is because the basic prophet model does not capture these variations in the trend which can be noticed from the plot below. Hence, these changepoints hyperparameters needs to be adjusted which is explored in the next steps.
+
+### Visualizing the Trend and Seasonality
+
+Prophet model outputs a trend and a seasonality with this dataset which can be seen in the plot below. Even when there is no seasonality present, as in our case, prophet assumes that there is seasonality. This can be avoided by setting the seasonality hyperparameters to **FALSE**.
+
+```{r warning = FALSE, message = FALSE}
+prophet_plot_components(orig_model,orig_forecast)
+```
+
+### Adjusting Model Hyperparameters
+
+The prophet model is updated with the hyperparameters adjusted to the values as below:
+
+|        Parameter        | Value |
+|:-----------------------:|:-----:|
+| changepoint.prior.scale | 0.15  |
+|     n.changepoints      |  25   |
+|    changepoint.range    | 0.90  |
+|      Seasonality        | FALSE |
+
+The trend and the seasonality identified by this model is shown in the plot below. Plotting the changepoints shown below indicate that adjusting the hyperparameter's helped in a better model as the changepoints are detected accurately when there is huge variations in the crude-oil prices. But this latest model still doesn't capture the underlying data generating process to the full effect.
+
+```{r warning = FALSE, message = FALSE}
+model = prophet(prophet_train,changepoint.prior.scale=0.15,n.changepoints = 25,changepoint.range=0.9,
+                yearly.seasonality = FALSE)
+                #changepoints = c('2014-05-01','2016-01-01','2020-01-01','2021-06-01','2022-06-01', '2022-07-01'))
+
+forecast = predict(model,orig_future)
+
+plot(model,forecast)+
+  add_changepoints_to_plot(model)+
+  theme_bw()+
+  xlab("Date")+
+  ylab("Crude-Oil Price")
+
+```
+
+Components which includes only the trend since the seasonality is set to FALSE is shown below:
+
+```{r warning = FALSE, message = FALSE}
+prophet_plot_components(model,forecast)
+```
+
+### Growth and Saturation
+
+#### Saturation Points
+
+When forecasting growth, it's possible that there is a maximum achievable point such as the upper and lower limits for the crude-oil prices. Usually, crude-oil prices are greater than 0\$. Also, although crude-oil prices seem to increase over time, price didn't go upwards of 150\$. Hence, these limits seems reasonable in our forecasts.
+
+#### Logistic Growth
+
+By default, prophet uses a linear model for its forecast. In this section, growth is assumed to be *logistic* and a prophet model is built on the training dataset with adjusted hyperparameters and seasonality set to **FALSE**.
+
+```{r warning = FALSE, message = FALSE}
+prophet_train$cap = 150
+prophet_train$floor = 0
+
+log_future = orig_future %>%
+  mutate(cap = 150, floor = 0)
+
+log_model = prophet(prophet_train, growth = 'logistic',changepoint.prior.scale=0.5,n.changepoints = 25,changepoint.range=0.9, weekly.seasonality = FALSE, yearly.seasonality = FALSE, daily.seasonality = FALSE) # Logistic Growth Model
+
+log_forecast = predict(log_model,log_future) # Get forecast
+
+plot(log_model,log_forecast) +
+  add_changepoints_to_plot(log_model)+
+  ylab("Crude Oil Price (in $ per barrel)") +
+  xlab("Date") +
+  theme_bw() +
+  ggtitle("Prophet Model on the Crude Oil Prices"
+    ,subtitle = "Forecast for 36 months from 2020-02 to 2023-12"
+  )
+
+```
+
+With no seasonality, both linear and logistic outputs similar models. But linear growth slightly seems to better represent the underlying data over logistic growth. Also, oil prices doesn't saturate to a point and varies with time. **Hence, linear model built previously with adjusted hyperparameters is considered to be the best prophet model.**
+
+#### Impact of Holidays
+
+Since the dataset is aggregated at monthly levels, there can be no impact from holidays which would work if we assess the crude-oil prices at granular levels such as hourly/daily.
+
+
+# Validation
+
+Cross-validation is implemented on the naive, best ARIMA, best Prophet models identified previously. We start with training length of 36 months (or 3 years) and rolling window of 6 months is considered on the training dataset. Forecast is made on the next 12 months for each of the cross-validation sets. Performance evaluation is done using RMSE obtained on each of the three models. Plot below shows the RMSE for the Naive, best ARIMA and best Prophet models across the horizon.
+
+```{r, warning = FALSE, message = FALSE}
+price_monthly_train_cv <- price_monthly_train |>
+  stretch_tsibble(.init = 36, .step = 6)
+
+#best_arima <- function(x, h){forecast(Arima(log(x), order=c(1,1,0)), h=h)}
+#e <- tsCV(price_monthly_train, best_arima, h=12)
+
+#Fit the same model with a rolling window of length 30
+#e <- tsCV(price_monthly_train, best_arima, h=12, window=1, initial = 1)
+
+naive_model <- price_monthly_train_cv %>%
+  model(Naive = NAIVE(Price)) %>%
+  forecast(h = 12) %>%
+  group_by(.id) %>%
+  mutate(h = row_number()) %>%
+  ungroup() %>%
+  as_fable(response = "Price", distribution = Price)
+
+accuracy_naive <- naive_model %>%
+  accuracy(price_monthly_train, by = c("h", ".model"))
+  # accuracy(price_monthly_train, by = c("h", ".model")) |>
+  # ggplot(aes(x = h, y = MASE)) +
+  # geom_point()
+
+best_arima <- price_monthly_train_cv %>%
+  model(
+    Arima = ARIMA(log(Price),approximation=F)
+  ) %>%
+  forecast(h = 12) %>%
+  group_by(.id) %>%
+  mutate(h = row_number()) %>%
+  ungroup() %>%
+  as_fable(response = "Price", distribution = Price)
+
+accuracy_arima <- best_arima %>%
+  accuracy(price_monthly_train, by = c("h", ".model"))
+
+# Best Prophet Model
+#best_prophet <- prophet(prophet_train, changepoint.prior.scale=0.15, n.changepoints = 25, changepoint.range=0.9, weekly.seasonality = FALSE, yearly.seasonality = FALSE, daily.seasonality = FALSE)
+#prophet_cv <- cross_validation(best_prophet, initial = 3*365, period = 180, horizon = 365, units = 'days')
+# prophet_cv <- cross_validation(best_prophet, initial = 3*365, period = 180, horizon = 180, units = 'days')
+# metrics1 = performance_metrics(prophet_cv)
+
+best_prophet <- price_monthly_train_cv %>% 
+  # select(ds,y) %>%
+  model(
+    Prophet = fable.prophet::prophet(Price ~ growth("linear", n_changepoints = 25, changepoint_range = 0.9,
+       changepoint_prior_scale = 0.15))
+  ) %>%
+  forecast(h = 12) %>%
+  group_by(.id) %>%
+  mutate(h = row_number()) %>%
+  ungroup() %>%
+  as_fable(response = "Price", distribution = Price)
+
+accuracy_prophet <- best_prophet %>%
+  accuracy(price_monthly_train, by = c("h", ".model"))
+
+accuracy_comparison <- accuracy_naive %>% 
+  bind_rows(accuracy_arima) %>% 
+  bind_rows(accuracy_prophet)
+
+accuracy_comparison <- accuracy_comparison %>%
+  rename(Horizon = h, Model = .model)
+
+accuracy_comparison %>%
+  ggplot()+
+  geom_line(aes(Horizon,RMSE, color = Model)) +
+  theme_bw() +
+  xlab("Horizon (in Months)") +
+  ylab("RMSE") +
+  ggtitle("Model Performance Comparison Across Horizon"
+    ,subtitle = "Comparing Naive, Best Arima, Best Prophet Model"
+  ) +
+  xlim(0, 13)
+
+```
+
+It can be inferred from the plot above that Naive model performs best across most of the horizon expect for when horizon is less than 2 months where ARIMA model works well. But the difference in RMSE seems negligible between the two models for this duration. So, Naive Model can be considered the best model of the three. Also, it can be seen that RMSE increases as the forecast horizon increases, as we would expect.
+
+# Forecast
+
+In previous section, we identified that naive model works well compared to ARIMA and Prophet models. Plot below shows the 
+3-year forecast from the naive model for the test dataset. 
+
+```{r, warning = FALSE, message = FALSE}
+
+best_model = price_monthly_train %>%
+  model(Naive = NAIVE(Price))
+
+best_model %>%
+  forecast(h=38) %>%
+  autoplot(
+    price_monthly_train %>%
+      select(Date,Price) %>%
+      bind_rows(
+        price_monthly_test %>%
+        as_tsibble()
+      )
+  ) +
+  geom_vline(aes(xintercept = ymd("2020-01-01")), color = "red", linetype = "dashed") +
+  ggtitle("3-year Forecast vs Actual of crude-oil prices", subtitle = 'Naive Forecast')
+```
+
+From the plot above, it is evident that forecast doesn't work well with test dataset. While naive model forecasts that crude-oil prices would be around 60$, the reality wasn't the same. As we first mentioned that crude-oil prices depend on macro-economic conditions. During Covid-19, crude-oil prices witnessed a drop and later, prices shot up because of Russia-Ukraine war. These conditions could not be modeled into our naive model and hence, forecasts are off by a margin. 
+
+Table below shows RMSE and MAPE on our out-of-sample dataset. It can be seen that Mean Absolute Percentage Error (MAPE) is ~38% for the test duration which also indicates that the forecasts are not good.
+
+```{r, warning = FALSE, message = FALSE}
+predicted <- best_model %>%
+  forecast(h=38) %>%
+  as_tsibble() %>%
+  select (Date, .mean) %>%
+  rename(predicted = .mean)
+
+perf_naive <- bind_cols(predicted, price_monthly_test$Price) %>%
+  rename(actual = ...3)
+
+out_rmse <- sqrt(mean((perf_naive$actual - perf_naive$predicted)^2,na.rm=T))
+out_mape <- mean(abs((perf_naive$actual-perf_naive$predicted)/perf_naive$actual)) * 100
+
+perf_metrics_test <- data.frame(out_rmse,out_mape)
+colnames(perf_metrics_test) <- c('RMSE', 'MAPE')
+
+head(perf_metrics_test) %>%
+  kbl(align=rep('c', 2), caption = "Performance Metrics on the Test Dataset") %>%
+  kable_styling()
+```
+
+:::
